@@ -2,12 +2,12 @@
 Alhakim AI — Answer Engine Backend
 ====================================
 A production-ready FastAPI server implementing a RAG pipeline:
-  1. Retrieve → DuckDuckGo web search (top 3 results)
+  1. Retrieve → Google Search via SerpApi (top 3 organic results)
   2. Scrape   → requests + BeautifulSoup HTML cleaning
   3. Generate → OpenRouter LLM (Claude Sonnet / Llama fallback)
 
 Author  : Senior AI Backend Engineer
-Version : 1.0.0
+Version : 1.2.0
 """
 
 import os
@@ -17,7 +17,7 @@ from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+from serpapi import GoogleSearch
 from openai import OpenAI
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,6 +41,12 @@ OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 if not OPENROUTER_API_KEY:
     logger.warning(
         "OPENROUTER_API_KEY is not set. Requests to the LLM will fail."
+    )
+
+SERPAPI_API_KEY: str = os.getenv("SERPAPI_API_KEY", "")
+if not SERPAPI_API_KEY:
+    logger.warning(
+        "SERPAPI_API_KEY is not set. Web search will fail."
     )
 
 # Number of search results to retrieve
@@ -106,28 +112,50 @@ class AskResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Module 1 — Retriever (DuckDuckGo)
+# Module 1 — Retriever (SerpApi / Google Search)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def retrieve_search_results(query: str) -> list[dict]:
     """
-    Search DuckDuckGo and return the top MAX_SEARCH_RESULTS results,
-    each as a dict with 'title', 'url', and 'body' keys.
+    Search Google via SerpApi and return the top MAX_SEARCH_RESULTS organic
+    results.  Each returned dict is normalised to contain:
+      'title'   — page title
+      'url'     — canonical page URL  (from SerpApi 'link' field)
+      'content' — short snippet text  (from SerpApi 'snippet' field)
+    SerpApi is a managed proxy service — it is never blocked on cloud servers.
     """
-    logger.info("🔍 Searching DuckDuckGo for: %s", query)
+    logger.info("🔍 Searching Google (SerpApi) for: %s", query)
+    if not SERPAPI_API_KEY:
+        logger.error("SERPAPI_API_KEY is not set — cannot perform search.")
+        return []
     try:
-        with DDGS() as ddgs:
-            results = list(
-                ddgs.text(
-                    query,
-                    max_results=MAX_SEARCH_RESULTS,
-                    safesearch="moderate",
-                )
-            )
-        logger.info("   Found %d result(s).", len(results))
+        params = {
+            "q": query,
+            "api_key": SERPAPI_API_KEY,
+            "num": MAX_SEARCH_RESULTS,   # number of organic results to request
+            "hl": "en",                  # result language
+            "gl": "us",                  # country for Google results
+        }
+        search = GoogleSearch(params)
+        raw: dict = search.get_dict()    # synchronous call; returns parsed JSON
+
+        organic: list[dict] = raw.get("organic_results", [])
+
+        # Normalise SerpApi field names to the internal schema the pipeline uses
+        results: list[dict] = [
+            {
+                "title":   item.get("title", "No Title"),
+                "url":     item.get("link", ""),
+                "content": item.get("snippet", ""),
+            }
+            for item in organic[:MAX_SEARCH_RESULTS]
+            if item.get("link")   # skip results without a usable URL
+        ]
+
+        logger.info("   Found %d organic result(s).", len(results))
         return results
     except Exception as exc:
-        logger.error("DuckDuckGo search failed: %s", exc)
+        logger.error("SerpApi search failed: %s", exc)
         return []
 
 
@@ -294,7 +322,7 @@ async def ask(request: AskRequest) -> AskResponse:
     """
     Full RAG pipeline endpoint:
       1. Validate input
-      2. Search the web (DuckDuckGo)
+      2. Search Google via SerpApi
       3. Scrape & clean the top results
       4. Build context and call the LLM
       5. Return structured answer + sources
@@ -319,14 +347,17 @@ async def ask(request: AskRequest) -> AskResponse:
     source_id: int = 1
 
     for result in search_results:
-        url: str = result.get("href", "")
+        url: str   = result.get("url", "")
         title: str = result.get("title", "No Title")
+        # SerpApi returns a pre-extracted snippet; use it as a fallback when
+        # the full scraper is blocked or the page returns an error.
+        serpapi_snippet: str = result.get("content", "")
 
         if not url:
             continue
 
         logger.info("🌐 Scraping [%d/%d]: %s", source_id, MAX_SEARCH_RESULTS, url)
-        content = scrape_and_clean(url)
+        content = scrape_and_clean(url) or serpapi_snippet[:MAX_SOURCE_CHARS] or None
 
         if content:
             enriched_sources.append(
