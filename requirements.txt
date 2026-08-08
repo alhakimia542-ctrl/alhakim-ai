@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────
+# Alhakim AI — Backend Dependencies
+# Compatible with Python 3.11+
+# Deploy target: Render (web service)
+# ─────────────────────────────────────────────────────
+
+# Web framework & ASGI server
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# Data validation (Pydantic v2 — bundled with FastAPI)
+pydantic==2.10.3
+
+# Environment variable loading
+python-dotenv==1.0.1
+
+# Web search
+duckduckgo-search==6.3.7
+
+# HTTP client for scraping
+requests==2.32.3
+
+# HTML parsing & NLP cleaning
+beautifulsoup4==4.12.3
+lxml==5.3.0          # Faster HTML parser backend for BeautifulSoup
+
+# OpenAI SDK (used as OpenRouter client)
+openai==1.57.4
