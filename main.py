@@ -96,8 +96,13 @@ app.add_middleware(
 # Pydantic Schemas
 # ─────────────────────────────────────────────────────────────────────────────
 
+class MessageItem(BaseModel):
+    role: str
+    content: str
+
+
 class AskRequest(BaseModel):
-    query: str
+    messages: list[MessageItem]
 
 
 class SourceItem(BaseModel):
@@ -269,20 +274,21 @@ Your behaviour rules:
 6. Be concise yet comprehensive."""
 
 
-def generate_answer(query: str, context: str) -> str:
+def generate_answer(messages_history: list[MessageItem], context: str) -> str:
     """
     Send the enriched prompt to OpenRouter and return the generated answer.
     Tries PRIMARY_MODEL first; on failure, retries with FALLBACK_MODEL.
     """
+    last_query = messages_history[-1].content if messages_history else ""
     user_message: str = (
         f"## Retrieved Context\n\n{context}\n\n"
-        f"## User Query\n\n{query}"
+        f"## User Query\n\n{last_query}"
     )
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_message},
-    ]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in messages_history[:-1]:
+        messages.append({"role": msg.role, "content": msg.content})
+    messages.append({"role": "user", "content": user_message})
 
     for model in (PRIMARY_MODEL, FALLBACK_MODEL):
         try:
@@ -327,9 +333,12 @@ async def ask(request: AskRequest) -> AskResponse:
       4. Build context and call the LLM
       5. Return structured answer + sources
     """
-    query: str = request.query.strip()
+    if not request.messages:
+        raise HTTPException(status_code=422, detail="Messages list must not be empty.")
+
+    query: str = request.messages[-1].content.strip()
     if not query:
-        raise HTTPException(status_code=422, detail="Query must not be empty.")
+        raise HTTPException(status_code=422, detail="Last message content must not be empty.")
 
     logger.info("=" * 60)
     logger.info("📨 New query: %s", query)
@@ -383,7 +392,7 @@ async def ask(request: AskRequest) -> AskResponse:
     context: str = build_context(enriched_sources)
 
     # ── Step 4: Generate answer via LLM ──────────────────────────────────────
-    answer: str = generate_answer(query, context)
+    answer: str = generate_answer(request.messages, context)
 
     # ── Step 5: Format and return response ────────────────────────────────────
     sources_out = [
