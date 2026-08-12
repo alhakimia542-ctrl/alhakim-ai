@@ -103,6 +103,8 @@ class MessageItem(BaseModel):
 
 class AskRequest(BaseModel):
     messages: list[MessageItem]
+    site_filter: Optional[str] = None
+    time_filter: Optional[str] = None
 
 
 class SourceItem(BaseModel):
@@ -120,7 +122,7 @@ class AskResponse(BaseModel):
 # Module 1 — Retriever (SerpApi / Google Search)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def retrieve_search_results(query: str) -> list[dict]:
+def retrieve_search_results(query: str, site_filter: Optional[str] = None, time_filter: Optional[str] = None) -> list[dict]:
     """
     Search Google via SerpApi and return the top MAX_SEARCH_RESULTS organic
     results.  Each returned dict is normalised to contain:
@@ -129,6 +131,9 @@ def retrieve_search_results(query: str) -> list[dict]:
       'content' — short snippet text  (from SerpApi 'snippet' field)
     SerpApi is a managed proxy service — it is never blocked on cloud servers.
     """
+    if site_filter and site_filter.strip() and site_filter.strip().lower() != "all":
+        query = f"{query} site:{site_filter.strip()}"
+
     logger.info("🔍 Searching Google (SerpApi) for: %s", query)
     if not SERPAPI_API_KEY:
         logger.error("SERPAPI_API_KEY is not set — cannot perform search.")
@@ -141,6 +146,8 @@ def retrieve_search_results(query: str) -> list[dict]:
             "hl": "en",                  # result language
             "gl": "us",                  # country for Google results
         }
+        if time_filter and time_filter.strip():
+            params["tbs"] = time_filter.strip()
         search = GoogleSearch(params)
         raw: dict = search.get_dict()    # synchronous call; returns parsed JSON
 
@@ -319,6 +326,43 @@ def generate_answer(messages_history: list[MessageItem], context: str) -> str:
     )
 
 
+def rewrite_search_query(messages: list[MessageItem]) -> str:
+    """
+    Rewrite the conversation history into a standalone search query.
+    """
+    if len(messages) == 1:
+        return messages[0].content
+
+    logger.info("✍️ Rewriting search query using conversation history...")
+    system_prompt = (
+        "Given the conversation history, rewrite the user's last message "
+        "into a standalone search query that can be used in Google Search. "
+        "Output ONLY the raw search query without quotes, explanations, or conversational text."
+    )
+    
+    # Build messages for LLM
+    llm_messages = [{"role": "system", "content": system_prompt}]
+    for msg in messages:
+        llm_messages.append({"role": msg.role, "content": msg.content})
+
+    try:
+        completion = openrouter_client.chat.completions.create(
+            model=FALLBACK_MODEL,
+            messages=llm_messages,
+            temperature=0.1,
+            max_tokens=100,
+        )
+        rewritten_query = completion.choices[0].message.content.strip()
+        # Clean up any wrapping quotes
+        if rewritten_query.startswith('"') and rewritten_query.endswith('"'):
+            rewritten_query = rewritten_query[1:-1]
+        logger.info("   ✅ Rewritten query: %s", rewritten_query)
+        return rewritten_query
+    except Exception as exc:
+        logger.error("   ❌ Query rewriting failed: %s", exc)
+        return messages[-1].content
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # API Endpoint
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,15 +380,22 @@ async def ask(request: AskRequest) -> AskResponse:
     if not request.messages:
         raise HTTPException(status_code=422, detail="Messages list must not be empty.")
 
-    query: str = request.messages[-1].content.strip()
-    if not query:
+    last_message: str = request.messages[-1].content.strip()
+    if not last_message:
         raise HTTPException(status_code=422, detail="Last message content must not be empty.")
 
     logger.info("=" * 60)
-    logger.info("📨 New query: %s", query)
+    logger.info("📨 New query: %s", last_message)
+
+    # Rewrite query if there is history
+    search_query = rewrite_search_query(request.messages)
 
     # ── Step 1: Retrieve search results ──────────────────────────────────────
-    search_results = retrieve_search_results(query)
+    search_results = retrieve_search_results(
+        query=search_query,
+        site_filter=request.site_filter,
+        time_filter=request.time_filter,
+    )
     if not search_results:
         raise HTTPException(
             status_code=503,
