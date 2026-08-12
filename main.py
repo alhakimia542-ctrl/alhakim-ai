@@ -105,6 +105,7 @@ class AskRequest(BaseModel):
     messages: list[MessageItem]
     site_filter: Optional[str] = None
     time_filter: Optional[str] = None
+    model: Optional[str] = "google/gemini-2.0-flash-exp:free"
 
 
 class SourceItem(BaseModel):
@@ -281,10 +282,10 @@ Your behaviour rules:
 6. Be concise yet comprehensive."""
 
 
-def generate_answer(messages_history: list[MessageItem], context: str) -> str:
+def generate_answer(messages_history: list[MessageItem], context: str, selected_model: Optional[str] = None) -> str:
     """
     Send the enriched prompt to OpenRouter and return the generated answer.
-    Tries PRIMARY_MODEL first; on failure, retries with FALLBACK_MODEL.
+    Tries selected_model first; on failure, retries with fallback.
     """
     last_query = messages_history[-1].content if messages_history else ""
     user_message: str = (
@@ -297,7 +298,10 @@ def generate_answer(messages_history: list[MessageItem], context: str) -> str:
         messages.append({"role": msg.role, "content": msg.content})
     messages.append({"role": "user", "content": user_message})
 
-    for model in (PRIMARY_MODEL, FALLBACK_MODEL):
+    model_to_use = selected_model if selected_model else "google/gemini-2.0-flash-exp:free"
+    fallback = "meta-llama/llama-3.2-3b-instruct"
+
+    for model in (model_to_use, fallback):
         try:
             logger.info("🤖 Calling model: %s", model)
             completion = openrouter_client.chat.completions.create(
@@ -314,7 +318,7 @@ def generate_answer(messages_history: list[MessageItem], context: str) -> str:
                 "   ❌  Model %s failed: %s. %s",
                 model,
                 exc,
-                "Trying fallback..." if model == PRIMARY_MODEL else "No more fallbacks.",
+                "Trying fallback..." if model == model_to_use else "No more fallbacks.",
             )
 
     raise HTTPException(
@@ -364,8 +368,30 @@ def rewrite_search_query(messages: list[MessageItem]) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# API Endpoint
+# API Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/models", summary="Get available models")
+async def get_models() -> list[dict]:
+    """
+    Fetch the list of available models from OpenRouter.
+    Falls back to a hardcoded list if the request fails.
+    """
+    try:
+        response = requests.get("https://openrouter.ai/api/v1/models", timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        data = response.json()
+        models = [{"id": m["id"], "name": m["name"]} for m in data.get("data", [])]
+        return models
+    except Exception as exc:
+        logger.error("Failed to fetch models from OpenRouter: %s", exc)
+        return [
+            {"id": "google/gemini-2.0-flash-exp:free", "name": "Gemini 2.0 Flash Exp (Free)"},
+            {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+            {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet"},
+            {"id": "meta-llama/llama-3.2-3b-instruct", "name": "Llama 3.2 3B Instruct"},
+            {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}
+        ]
 
 @app.post("/api/ask", response_model=AskResponse, summary="Ask the answer engine")
 async def ask(request: AskRequest) -> AskResponse:
@@ -443,7 +469,7 @@ async def ask(request: AskRequest) -> AskResponse:
     context: str = build_context(enriched_sources)
 
     # ── Step 4: Generate answer via LLM ──────────────────────────────────────
-    answer: str = generate_answer(request.messages, context)
+    answer: str = generate_answer(request.messages, context, selected_model=request.model)
 
     # ── Step 5: Format and return response ────────────────────────────────────
     sources_out = [
