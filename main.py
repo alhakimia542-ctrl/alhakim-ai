@@ -106,6 +106,7 @@ class AskRequest(BaseModel):
     site_filter: Optional[str] = None
     time_filter: Optional[str] = None
     model: Optional[str] = "google/gemini-2.0-flash-exp:free"
+    focus_mode: Optional[str] = "web"
 
 
 class SourceItem(BaseModel):
@@ -123,7 +124,19 @@ class AskResponse(BaseModel):
 # Module 1 — Retriever (SerpApi / Google Search)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def retrieve_search_results(query: str, site_filter: Optional[str] = None, time_filter: Optional[str] = None) -> list[dict]:
+# Focus Mode — trusted domain filters appended to the search query
+FOCUS_MODE_DOMAINS: dict[str, str] = {
+    "medical":  "site:ncbi.nlm.nih.gov OR site:who.int OR site:mayoclinic.org",
+    "academic": "site:edu OR site:researchgate.net OR site:springer.com",
+}
+
+
+def retrieve_search_results(
+    query: str,
+    site_filter: Optional[str] = None,
+    time_filter: Optional[str] = None,
+    focus_mode: Optional[str] = "web",
+) -> list[dict]:
     """
     Search Google via SerpApi and return the top MAX_SEARCH_RESULTS organic
     results.  Each returned dict is normalised to contain:
@@ -131,9 +144,18 @@ def retrieve_search_results(query: str, site_filter: Optional[str] = None, time_
       'url'     — canonical page URL  (from SerpApi 'link' field)
       'content' — short snippet text  (from SerpApi 'snippet' field)
     SerpApi is a managed proxy service — it is never blocked on cloud servers.
+
+    When *focus_mode* is 'medical' or 'academic', trusted domain filters are
+    appended to the query **unless** *site_filter* is already actively set,
+    since an explicit site filter takes precedence.
     """
+    # Explicit site_filter takes priority over focus_mode domain injection
     if site_filter and site_filter.strip() and site_filter.strip().lower() != "all":
         query = f"{query} site:{site_filter.strip()}"
+    elif focus_mode and focus_mode.strip().lower() in FOCUS_MODE_DOMAINS:
+        domain_filter = FOCUS_MODE_DOMAINS[focus_mode.strip().lower()]
+        query = f"{query} {domain_filter}"
+        logger.info("🎯 Focus Mode '%s' active — domain filter applied.", focus_mode)
 
     logger.info("🔍 Searching Google (SerpApi) for: %s", query)
     if not SERPAPI_API_KEY:
@@ -282,7 +304,21 @@ Your behaviour rules:
 6. Be concise yet comprehensive."""
 
 
-def generate_answer(messages_history: list[MessageItem], context: str, selected_model: Optional[str] = None) -> str:
+# Strict guardrail appended to SYSTEM_PROMPT when focus_mode == "medical"
+MEDICAL_GUARDRAIL: str = (
+    "\n\nCRITICAL: This is a medical query. You must ONLY use the provided context. "
+    "If the context does not contain sufficient clinical or medical evidence to answer "
+    "safely, state explicitly that reliable medical information is unavailable. "
+    "DO NOT give general medical advice."
+)
+
+
+def generate_answer(
+    messages_history: list[MessageItem],
+    context: str,
+    selected_model: Optional[str] = None,
+    focus_mode: Optional[str] = "web",
+) -> str:
     """
     Send the enriched prompt to OpenRouter and return the generated answer.
     Tries selected_model first; on failure, retries with fallback.
@@ -293,7 +329,13 @@ def generate_answer(messages_history: list[MessageItem], context: str, selected_
         f"## User Query\n\n{last_query}"
     )
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # Apply medical guardrail when focus_mode is 'medical'
+    effective_system_prompt = SYSTEM_PROMPT
+    if focus_mode and focus_mode.strip().lower() == "medical":
+        effective_system_prompt = SYSTEM_PROMPT + MEDICAL_GUARDRAIL
+        logger.info("🏥 Medical guardrail active — strict context-only rule applied.")
+
+    messages = [{"role": "system", "content": effective_system_prompt}]
     for msg in messages_history[:-1]:
         messages.append({"role": msg.role, "content": msg.content})
     messages.append({"role": "user", "content": user_message})
@@ -421,6 +463,7 @@ async def ask(request: AskRequest) -> AskResponse:
         query=search_query,
         site_filter=request.site_filter,
         time_filter=request.time_filter,
+        focus_mode=request.focus_mode,
     )
     if not search_results:
         raise HTTPException(
@@ -469,7 +512,12 @@ async def ask(request: AskRequest) -> AskResponse:
     context: str = build_context(enriched_sources)
 
     # ── Step 4: Generate answer via LLM ──────────────────────────────────────
-    answer: str = generate_answer(request.messages, context, selected_model=request.model)
+    answer: str = generate_answer(
+        request.messages,
+        context,
+        selected_model=request.model,
+        focus_mode=request.focus_mode,
+    )
 
     # ── Step 5: Format and return response ────────────────────────────────────
     sources_out = [
