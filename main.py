@@ -126,7 +126,11 @@ class AskResponse(BaseModel):
 
 # Focus Mode — trusted domain filters appended to the search query
 FOCUS_MODE_DOMAINS: dict[str, str] = {
-    "medical":  "site:ncbi.nlm.nih.gov OR site:who.int OR site:mayoclinic.org",
+    "medical": (
+        "site:ncbi.nlm.nih.gov OR site:who.int OR site:mayoclinic.org "
+        "OR site:nejm.org OR site:thelancet.com OR site:jamanetwork.com "
+        "OR site:bmj.com OR site:cochranelibrary.com OR site:clinicaltrials.gov"
+    ),
     "academic": "site:edu OR site:researchgate.net OR site:springer.com",
 }
 
@@ -161,16 +165,25 @@ def retrieve_search_results(
     if not SERPAPI_API_KEY:
         logger.error("SERPAPI_API_KEY is not set — cannot perform search.")
         return []
+    # Medical mode: fetch more results for richer clinical coverage
+    is_medical = focus_mode and focus_mode.strip().lower() == "medical"
+    num_results = 5 if is_medical else MAX_SEARCH_RESULTS
+
     try:
         params = {
             "q": query,
             "api_key": SERPAPI_API_KEY,
-            "num": MAX_SEARCH_RESULTS,   # number of organic results to request
+            "num": num_results,          # number of organic results to request
             "hl": "en",                  # result language
             "gl": "us",                  # country for Google results
         }
         if time_filter and time_filter.strip():
             params["tbs"] = time_filter.strip()
+        elif is_medical:
+            # Auto-apply past-year recency filter for medical queries so that
+            # cutting-edge guidelines and recent trial data are prioritised.
+            params["tbs"] = "qdr:y"
+            logger.info("🗓️  Medical mode: auto-applied past-year recency filter (tbs=qdr:y).")
         search = GoogleSearch(params)
         raw: dict = search.get_dict()    # synchronous call; returns parsed JSON
 
@@ -183,7 +196,7 @@ def retrieve_search_results(
                 "url":     item.get("link", ""),
                 "content": item.get("snippet", ""),
             }
-            for item in organic[:MAX_SEARCH_RESULTS]
+            for item in organic[:num_results]
             if item.get("link")   # skip results without a usable URL
         ]
 
@@ -477,8 +490,15 @@ async def ask(request: AskRequest) -> AskResponse:
         if not url:
             continue
 
-        logger.info("🌐 Scraping [%d/%d]: %s", source_id, MAX_SEARCH_RESULTS, url)
-        content = scrape_and_clean(url) or serpapi_snippet[:MAX_SOURCE_CHARS] or None
+        # Medical focus mode: allow up to 3000 chars to preserve full clinical
+        # trial parameters, dosage tables, and study methodology details.
+        effective_max_chars = 3000 if request.focus_mode and request.focus_mode.strip().lower() == "medical" else MAX_SOURCE_CHARS
+        logger.info("🌐 Scraping [%d/%d]: %s", source_id, len(search_results), url)
+        scraped = scrape_and_clean(url)
+        if scraped:
+            content = scraped[:effective_max_chars]
+        else:
+            content = serpapi_snippet[:effective_max_chars] or None
 
         if content:
             enriched_sources.append(
