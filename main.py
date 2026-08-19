@@ -10,10 +10,13 @@ Author  : Senior AI Backend Engineer
 Version : 1.2.0
 """
 
+import ipaddress
 import os
 import re
 import logging
+import socket
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -82,11 +85,16 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Load allowed origins from env — comma-separated list, e.g.:
+# FRONTEND_URL=https://alhakim.ai,https://staging.alhakim.ai
+_ALLOWED_ORIGINS: list[str] = os.getenv(
+    "FRONTEND_URL", "http://localhost:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    # In production, replace "*" with your frontend's exact origin,
-    # e.g. ["https://alhakim.ai", "http://localhost:3000"]
-    allow_origins=["*"],
+    # Loaded from FRONTEND_URL env var; never use "*" with allow_credentials=True
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -126,12 +134,14 @@ class AskResponse(BaseModel):
 
 # Focus Mode — trusted domain filters appended to the search query
 FOCUS_MODE_DOMAINS: dict[str, str] = {
+    # Wrapped in () so Google treats the entire OR group as one unit when
+    # appended to the main query — fixes operator-precedence bugs.
     "medical": (
-        "site:ncbi.nlm.nih.gov OR site:who.int OR site:mayoclinic.org "
+        "(site:ncbi.nlm.nih.gov OR site:who.int OR site:mayoclinic.org "
         "OR site:nejm.org OR site:thelancet.com OR site:jamanetwork.com "
-        "OR site:bmj.com OR site:cochranelibrary.com OR site:clinicaltrials.gov"
+        "OR site:bmj.com OR site:cochranelibrary.com OR site:clinicaltrials.gov)"
     ),
-    "academic": "site:edu OR site:researchgate.net OR site:springer.com",
+    "academic": "(site:edu OR site:researchgate.net OR site:springer.com)",
 }
 
 
@@ -251,22 +261,89 @@ NOISE_TAGS: list[str] = [
 ]
 
 
+# Hard cap on HTML bytes downloaded per page — prevents memory exhaustion
+# from maliciously large pages (DoS via streaming).
+MAX_HTML_BYTES: int = 2 * 1024 * 1024  # 2 MB
+
+# Private / loopback CIDR ranges used for SSRF rejection
+_PRIVATE_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),  # link-local
+    ipaddress.ip_network("::1/128"),          # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),         # IPv6 unique-local
+]
+
+
+def _is_safe_url(url: str) -> bool:
+    """
+    SSRF guard — returns False (unsafe) when:
+      • The URL scheme is not http or https.
+      • The resolved IP falls inside a private / loopback network range.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            logger.warning("🚫 SSRF guard: rejected non-http(s) scheme '%s' in %s", parsed.scheme, url)
+            return False
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return False
+        # Resolve hostname → IP and check against private ranges
+        resolved_ip = ipaddress.ip_address(socket.gethostbyname(hostname))
+        for network in _PRIVATE_NETWORKS:
+            if resolved_ip in network:
+                logger.warning(
+                    "🚫 SSRF guard: rejected private/local IP %s for host '%s'",
+                    resolved_ip,
+                    hostname,
+                )
+                return False
+        return True
+    except Exception as exc:
+        logger.warning("🚫 SSRF guard: URL validation failed for %s — %s", url, exc)
+        return False
+
+
 def scrape_and_clean(url: str) -> Optional[str]:
     """
-    Fetch a URL, strip noisy HTML tags, extract readable plain text,
-    collapse whitespace, and truncate to MAX_SOURCE_CHARS.
+    Fetch a URL safely:
+      • SSRF guard rejects private/local targets before any request.
+      • Streaming download with a 2 MB hard cap prevents DoS via huge pages.
+      • Noisy HTML tags are stripped; text is collapsed and truncated.
     Returns None if the request or parse fails.
     """
+    if not _is_safe_url(url):
+        return None
+
     try:
         response = requests.get(
             url,
             headers=SCRAPE_HEADERS,
             timeout=REQUEST_TIMEOUT,
             allow_redirects=True,
+            stream=True,                   # stream to enforce byte cap
         )
         response.raise_for_status()
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        # Read in chunks; stop once we hit MAX_HTML_BYTES to avoid OOM
+        chunks: list[bytes] = []
+        downloaded: int = 0
+        for chunk in response.iter_content(chunk_size=65_536):  # 64 KB per chunk
+            chunks.append(chunk)
+            downloaded += len(chunk)
+            if downloaded >= MAX_HTML_BYTES:
+                logger.warning(
+                    "   ⚠  Page exceeded %d MB cap — truncating download: %s",
+                    MAX_HTML_BYTES // (1024 * 1024),
+                    url,
+                )
+                break
+        html_bytes = b"".join(chunks)
+
+        soup = BeautifulSoup(html_bytes, "html.parser")
 
         # Remove noise tags in-place
         for tag in soup(NOISE_TAGS):
@@ -392,11 +469,17 @@ def generate_answer(
                 "Trying fallback..." if model == model_to_use else "No more fallbacks.",
             )
 
+    logger.error(
+        "💥 All LLM models exhausted — primary: %s, fallback: %s. "
+        "Check OPENROUTER_API_KEY and model availability on openrouter.ai.",
+        model_to_use,
+        fallback,
+    )
     raise HTTPException(
         status_code=502,
         detail=(
-            "Both the primary and fallback LLM models are unavailable. "
-            "Please check your OPENROUTER_API_KEY and try again."
+            "AI generation failed due to high traffic or API limits. "
+            "Please try again in a few moments."
         ),
     )
 
