@@ -105,7 +105,7 @@ class AskRequest(BaseModel):
     messages: list[MessageItem]
     site_filter: Optional[str] = None
     time_filter: Optional[str] = None
-    model: Optional[str] = "google/gemini-2.0-flash-exp:free"
+    model: Optional[str] = "google/gemini-1.5-flash"
     focus_mode: Optional[str] = "web"
 
 
@@ -341,7 +341,7 @@ def generate_answer(
         messages.append({"role": msg.role, "content": msg.content})
     messages.append({"role": "user", "content": user_message})
 
-    model_to_use = selected_model if selected_model else "google/gemini-2.0-flash-exp:free"
+    model_to_use = selected_model if selected_model else "google/gemini-1.5-flash"
     fallback = "meta-llama/llama-3.2-3b-instruct"
 
     for model in (model_to_use, fallback):
@@ -417,24 +417,16 @@ def rewrite_search_query(messages: list[MessageItem]) -> str:
 @app.get("/api/models", summary="Get available models")
 async def get_models() -> list[dict]:
     """
-    Fetch the list of available models from OpenRouter.
-    Falls back to a hardcoded list if the request fails.
+    Returns a curated list of top-tier AI models available via OpenRouter.
     """
-    try:
-        response = requests.get("https://openrouter.ai/api/v1/models", timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
-        models = [{"id": m["id"], "name": m["name"]} for m in data.get("data", [])]
-        return models
-    except Exception as exc:
-        logger.error("Failed to fetch models from OpenRouter: %s", exc)
-        return [
-            {"id": "google/gemini-2.0-flash-exp:free", "name": "Gemini 2.0 Flash Exp (Free)"},
-            {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
-            {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet"},
-            {"id": "meta-llama/llama-3.2-3b-instruct", "name": "Llama 3.2 3B Instruct"},
-            {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}
-        ]
+    return [
+        {"id": "google/gemini-1.5-flash", "name": "Gemini 1.5 Flash (Default)"},
+        {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet"},
+        {"id": "openai/gpt-4o", "name": "GPT-4o"},
+        {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"},
+        {"id": "deepseek/deepseek-chat", "name": "DeepSeek V3"},
+        {"id": "meta-llama/llama-3.3-70b-instruct", "name": "Llama 3.3 70B"},
+    ]
 
 @app.post("/api/ask", response_model=AskResponse, summary="Ask the answer engine")
 async def ask(request: AskRequest) -> AskResponse:
