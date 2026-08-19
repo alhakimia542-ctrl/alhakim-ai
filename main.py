@@ -169,6 +169,21 @@ def retrieve_search_results(
     is_medical = focus_mode and focus_mode.strip().lower() == "medical"
     num_results = 5 if is_medical else MAX_SEARCH_RESULTS
 
+    def _run_search(search_params: dict) -> list[dict]:
+        """Execute a single SerpApi call and return normalised results."""
+        search = GoogleSearch(search_params)
+        raw: dict = search.get_dict()
+        organic: list[dict] = raw.get("organic_results", [])
+        return [
+            {
+                "title":   item.get("title", "No Title"),
+                "url":     item.get("link", ""),
+                "content": item.get("snippet", ""),
+            }
+            for item in organic[:num_results]
+            if item.get("link")
+        ]
+
     try:
         params = {
             "q": query,
@@ -184,23 +199,24 @@ def retrieve_search_results(
             # cutting-edge guidelines and recent trial data are prioritised.
             params["tbs"] = "qdr:y"
             logger.info("🗓️  Medical mode: auto-applied past-year recency filter (tbs=qdr:y).")
-        search = GoogleSearch(params)
-        raw: dict = search.get_dict()    # synchronous call; returns parsed JSON
 
-        organic: list[dict] = raw.get("organic_results", [])
-
-        # Normalise SerpApi field names to the internal schema the pipeline uses
-        results: list[dict] = [
-            {
-                "title":   item.get("title", "No Title"),
-                "url":     item.get("link", ""),
-                "content": item.get("snippet", ""),
-            }
-            for item in organic[:num_results]
-            if item.get("link")   # skip results without a usable URL
-        ]
-
+        results = _run_search(params)
         logger.info("   Found %d organic result(s).", len(results))
+
+        # ── Medical fallback: retry without time restriction ──────────────────
+        # If the strict recency filter yielded nothing (e.g. a niche clinical
+        # topic with no recent indexed pages), drop tbs and search again across
+        # the same 9 trusted medical domains so we never surface an empty result.
+        if not results and is_medical and "tbs" in params and not (time_filter and time_filter.strip()):
+            logger.warning(
+                "⚠️  Medical recency search returned 0 results — retrying without time filter."
+            )
+            params_fallback = {k: v for k, v in params.items() if k != "tbs"}
+            results = _run_search(params_fallback)
+            logger.info(
+                "   Fallback search found %d organic result(s).", len(results)
+            )
+
         return results
     except Exception as exc:
         logger.error("SerpApi search failed: %s", exc)
