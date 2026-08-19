@@ -164,19 +164,22 @@ def retrieve_search_results(
     since an explicit site filter takes precedence.
     """
     # Explicit site_filter takes priority over focus_mode domain injection
+    fm_lower = focus_mode.strip().lower() if focus_mode else ""
     if site_filter and site_filter.strip() and site_filter.strip().lower() != "all":
         query = f"{query} site:{site_filter.strip()}"
-    elif focus_mode and focus_mode.strip().lower() in FOCUS_MODE_DOMAINS:
-        domain_filter = FOCUS_MODE_DOMAINS[focus_mode.strip().lower()]
-        query = f"{query} {domain_filter}"
-        logger.info("🎯 Focus Mode '%s' active — domain filter applied.", focus_mode)
+    elif "medical" in fm_lower:
+        query = f"{query} {FOCUS_MODE_DOMAINS['medical']}"
+        logger.info("🎯 Focus Mode 'Medical' active.")
+    elif "academic" in fm_lower:
+        query = f"{query} {FOCUS_MODE_DOMAINS['academic']}"
+        logger.info("🎯 Focus Mode 'Academic' active.")
 
     logger.info("🔍 Searching Google (SerpApi) for: %s", query)
     if not SERPAPI_API_KEY:
         logger.error("SERPAPI_API_KEY is not set — cannot perform search.")
         return []
     # Medical mode: fetch more results for richer clinical coverage
-    is_medical = focus_mode and focus_mode.strip().lower() == "medical"
+    is_medical = focus_mode and "medical" in focus_mode.strip().lower()
     num_results = 5 if is_medical else MAX_SEARCH_RESULTS
 
     def _run_search(search_params: dict) -> list[dict]:
@@ -437,7 +440,7 @@ def generate_answer(
 
     # Apply medical guardrail when focus_mode is 'medical'
     effective_system_prompt = SYSTEM_PROMPT
-    if focus_mode and focus_mode.strip().lower() == "medical":
+    if focus_mode and "medical" in focus_mode.strip().lower():
         effective_system_prompt = SYSTEM_PROMPT + MEDICAL_GUARDRAIL
         logger.info("🏥 Medical guardrail active — strict context-only rule applied.")
 
@@ -591,7 +594,8 @@ async def ask(request: AskRequest) -> AskResponse:
 
         # Medical focus mode: allow up to 3000 chars to preserve full clinical
         # trial parameters, dosage tables, and study methodology details.
-        effective_max_chars = 3000 if request.focus_mode and request.focus_mode.strip().lower() == "medical" else MAX_SOURCE_CHARS
+        is_medical_mode = request.focus_mode and "medical" in request.focus_mode.strip().lower()
+        effective_max_chars = 3000 if is_medical_mode else MAX_SOURCE_CHARS
         logger.info("🌐 Scraping [%d/%d]: %s", source_id, len(search_results), url)
         scraped = scrape_and_clean(url)
         if scraped:
