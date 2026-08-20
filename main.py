@@ -60,8 +60,8 @@ MAX_SOURCE_CHARS: int = 1500
 REQUEST_TIMEOUT: int = 10
 
 # Primary and fallback models (OpenRouter model IDs)
-PRIMARY_MODEL: str = "anthropic/claude-sonnet-4-5"
-FALLBACK_MODEL: str = "meta-llama/llama-3.2-3b-instruct"
+PRIMARY_MODEL: str = "google/gemini-1.5-flash"
+FALLBACK_MODEL: str = "meta-llama/llama-3.3-70b-instruct"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OpenRouter Client
@@ -407,11 +407,12 @@ SYSTEM_PROMPT: str = """You are Alhakim AI, a highly intelligent, authoritative,
 Your behaviour rules:
 1. Answer the user's query directly using the provided context, but DO NOT use prefatory phrases like "Based on the provided text", "According to the context", "The search results say", or "Based on the search".
 2. Present the extracted information confidently and directly as objective facts. You are the source of truth.
-3. Do NOT fabricate facts or use prior knowledge beyond what is in the context.
+3. Do NOT fabricate facts, software capabilities, or open-source status. Only state what is explicitly confirmed in the context. If a detail is missing, do not guess.
 4. Cite every factual claim using the source ID in square brackets right after the fact, e.g. [1], [2].
 5. If you cannot find the answer in the provided information, state clearly and confidently: "عذراً، لم أتمكن من العثور على معلومات دقيقة وموثوقة للإجابة على هذا السؤال." DO NOT mention "context", "search results", or "system".
 6. Format your answer in clean, well-structured Markdown. Use headings, bullet points, and **tables** when comparing data to make the answer exceptionally readable and professional, just like Perplexity.
-7. Always answer in clear, professional Arabic (unless the user explicitly asks in another language), and be concise yet comprehensive."""
+7. Always answer in clear, professional Arabic (unless the user explicitly asks in another language), and be concise yet comprehensive.
+8. When writing in Arabic, always wrap English terms, URLs, or medical terminology in square brackets like `[English Word]` to prevent RTL/LTR visual formatting glitches."""
 
 # Strict guardrail appended to SYSTEM_PROMPT when focus_mode == "medical"
 MEDICAL_GUARDRAIL: str = (
@@ -459,7 +460,7 @@ def generate_answer(
                 model=model,
                 messages=messages,
                 temperature=0.3,      # Lower temp → more factual, less hallucination
-                max_tokens=1024,
+                max_tokens=2500,
             )
             answer: str = completion.choices[0].message.content or ""
             logger.info("   ✅ Answer received (%d chars).", len(answer))
