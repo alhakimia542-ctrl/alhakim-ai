@@ -461,6 +461,8 @@ def generate_answer(
                 messages=messages,
                 temperature=0.3,      # Lower temp → more factual, less hallucination
                 max_tokens=2500,
+                presence_penalty=0.6,
+                frequency_penalty=0.6,
             )
             answer: str = completion.choices[0].message.content or ""
             logger.info("   ✅ Answer received (%d chars).", len(answer))
