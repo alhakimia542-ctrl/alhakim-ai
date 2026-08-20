@@ -164,8 +164,15 @@ def retrieve_search_results(
     since an explicit site filter takes precedence.
     """
     # Explicit site_filter takes priority over focus_mode domain injection
+    is_custom_site = (
+        site_filter 
+        and site_filter.strip() 
+        and site_filter.strip().lower() not in ("all", "all sites")
+    )
+
     fm_lower = focus_mode.strip().lower() if focus_mode else ""
-    if site_filter and site_filter.strip() and site_filter.strip().lower() != "all":
+
+    if is_custom_site:
         query = f"{query} site:{site_filter.strip()}"
     elif "medical" in fm_lower:
         query = f"{query} {FOCUS_MODE_DOMAINS['medical']}"
