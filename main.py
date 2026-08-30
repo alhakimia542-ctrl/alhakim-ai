@@ -2,7 +2,7 @@
 Alhakim AI — Answer Engine Backend
 ====================================
 A production-ready FastAPI server implementing a RAG pipeline:
-  1. Retrieve → Google Search via SerpApi (top 3 organic results)
+  1. Retrieve → Google Custom Search API (top 3 organic results)
   2. Scrape   → requests + BeautifulSoup HTML cleaning
   3. Generate → OpenRouter LLM (Claude Sonnet / Llama fallback)
 
@@ -20,7 +20,6 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
-from serpapi import GoogleSearch
 from openai import OpenAI
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,10 +45,16 @@ if not OPENROUTER_API_KEY:
         "OPENROUTER_API_KEY is not set. Requests to the LLM will fail."
     )
 
-SERPAPI_API_KEY: str = os.getenv("SERPAPI_API_KEY", "")
-if not SERPAPI_API_KEY:
+GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+if not GOOGLE_API_KEY:
     logger.warning(
-        "SERPAPI_API_KEY is not set. Web search will fail."
+        "GOOGLE_API_KEY is not set. Web search will fail."
+    )
+
+GOOGLE_CSE_ID: str = os.getenv("GOOGLE_CSE_ID", "")
+if not GOOGLE_CSE_ID:
+    logger.warning(
+        "GOOGLE_CSE_ID is not set. Web search will fail."
     )
 
 # Number of search results to retrieve
@@ -129,7 +134,7 @@ class AskResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Module 1 — Retriever (SerpApi / Google Search)
+# Module 1 — Retriever (Google Custom Search API)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Focus Mode — trusted domain filters appended to the search query
@@ -152,12 +157,11 @@ def retrieve_search_results(
     focus_mode: Optional[str] = "web",
 ) -> list[dict]:
     """
-    Search Google via SerpApi and return the top MAX_SEARCH_RESULTS organic
+    Search Google via Custom Search API and return the top MAX_SEARCH_RESULTS organic
     results.  Each returned dict is normalised to contain:
       'title'   — page title
-      'url'     — canonical page URL  (from SerpApi 'link' field)
-      'content' — short snippet text  (from SerpApi 'snippet' field)
-    SerpApi is a managed proxy service — it is never blocked on cloud servers.
+      'url'     — canonical page URL  (from 'link' field)
+      'content' — short snippet text  (from 'snippet' field)
 
     When *focus_mode* is 'medical' or 'academic', trusted domain filters are
     appended to the query **unless** *site_filter* is already actively set,
@@ -181,57 +185,66 @@ def retrieve_search_results(
         query = f"{query} {FOCUS_MODE_DOMAINS['academic']}"
         logger.info("🎯 Focus Mode 'Academic' active.")
 
-    logger.info("🔍 Searching Google (SerpApi) for: %s", query)
-    if not SERPAPI_API_KEY:
-        logger.error("SERPAPI_API_KEY is not set — cannot perform search.")
+    logger.info("🔍 Searching Google Custom Search for: %s", query)
+    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
+        logger.error("GOOGLE_API_KEY or GOOGLE_CSE_ID is not set — cannot perform search.")
         return []
     # Medical mode: fetch more results for richer clinical coverage
     is_medical = focus_mode and "medical" in focus_mode.strip().lower()
     num_results = 5 if is_medical else MAX_SEARCH_RESULTS
 
     def _run_search(search_params: dict) -> list[dict]:
-        """Execute a single SerpApi call and return normalised results."""
-        search = GoogleSearch(search_params)
-        raw: dict = search.get_dict()
-        organic: list[dict] = raw.get("organic_results", [])
-        return [
-            {
-                "title":   item.get("title", "No Title"),
-                "url":     item.get("link", ""),
-                "content": item.get("snippet", ""),
-            }
-            for item in organic[:num_results]
-            if item.get("link")
-        ]
+        """Execute a single Custom Search API call and return normalised results."""
+        try:
+            response = requests.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params=search_params,
+                timeout=REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+            raw: dict = response.json()
+            items: list[dict] = raw.get("items", [])
+            return [
+                {
+                    "title":   item.get("title", "No Title"),
+                    "url":     item.get("link", ""),
+                    "content": item.get("snippet", ""),
+                }
+                for item in items[:num_results]
+                if item.get("link")
+            ]
+        except Exception as exc:
+            logger.error("Google Custom Search API request failed: %s", exc)
+            return []
 
     try:
         params = {
+            "key": GOOGLE_API_KEY,
+            "cx": GOOGLE_CSE_ID,
             "q": query,
-            "api_key": SERPAPI_API_KEY,
             "num": num_results,          # number of organic results to request
-            "hl": "en",                  # result language
-            "gl": "us",                  # country for Google results
+            "hl": "ar",                  # result language
         }
         if time_filter and time_filter.strip():
-            params["tbs"] = time_filter.strip()
+            params["dateRestrict"] = time_filter.strip()
         elif is_medical:
             # Auto-apply past-year recency filter for medical queries so that
             # cutting-edge guidelines and recent trial data are prioritised.
-            params["tbs"] = "qdr:y"
-            logger.info("🗓️  Medical mode: auto-applied past-year recency filter (tbs=qdr:y).")
+            params["dateRestrict"] = "y[1]"
+            logger.info("🗓️  Medical mode: auto-applied past-year recency filter (dateRestrict=y[1]).")
 
         results = _run_search(params)
         logger.info("   Found %d organic result(s).", len(results))
 
         # ── Medical fallback: retry without time restriction ──────────────────
         # If the strict recency filter yielded nothing (e.g. a niche clinical
-        # topic with no recent indexed pages), drop tbs and search again across
+        # topic with no recent indexed pages), drop dateRestrict and search again across
         # the same 9 trusted medical domains so we never surface an empty result.
-        if not results and is_medical and "tbs" in params and not (time_filter and time_filter.strip()):
+        if not results and is_medical and "dateRestrict" in params and not (time_filter and time_filter.strip()):
             logger.warning(
                 "⚠️  Medical recency search returned 0 results — retrying without time filter."
             )
-            params_fallback = {k: v for k, v in params.items() if k != "tbs"}
+            params_fallback = {k: v for k, v in params.items() if k != "dateRestrict"}
             results = _run_search(params_fallback)
             logger.info(
                 "   Fallback search found %d organic result(s).", len(results)
@@ -239,7 +252,7 @@ def retrieve_search_results(
 
         return results
     except Exception as exc:
-        logger.error("SerpApi search failed: %s", exc)
+        logger.error("Google Custom Search failed: %s", exc)
         return []
 
 
@@ -595,9 +608,9 @@ async def ask(request: AskRequest) -> AskResponse:
     for result in search_results:
         url: str   = result.get("url", "")
         title: str = result.get("title", "No Title")
-        # SerpApi returns a pre-extracted snippet; use it as a fallback when
+        # Google Custom Search returns a pre-extracted snippet; use it as a fallback when
         # the full scraper is blocked or the page returns an error.
-        serpapi_snippet: str = result.get("content", "")
+        search_snippet: str = result.get("content", "")
 
         if not url:
             continue
@@ -611,7 +624,7 @@ async def ask(request: AskRequest) -> AskResponse:
         if scraped:
             content = scraped[:effective_max_chars]
         else:
-            content = serpapi_snippet[:effective_max_chars] or None
+            content = search_snippet[:effective_max_chars] or None
 
         if content:
             enriched_sources.append(

@@ -14,8 +14,7 @@ pydantic==2.10.3
 # Environment variable loading
 python-dotenv==1.0.1
 
-# Web search — Google Search via SerpApi (cloud-safe, never blocked)
-google-search-results==2.4.2
+# Web search — Google Custom Search API (requests is used instead)
 
 # HTTP client for scraping
 requests==2.32.3
