@@ -147,6 +147,11 @@ FOCUS_MODE_DOMAINS: dict[str, str] = {
         "OR site:bmj.com OR site:cochranelibrary.com OR site:clinicaltrials.gov)"
     ),
     "academic": "(site:edu OR site:researchgate.net OR site:springer.com)",
+    "general": (
+        "(site:youtube.com OR site:twitter.com OR site:instagram.com "
+        "OR site:aljazeera.net OR site:alarabiya.net OR site:github.com "
+        "OR site:wikipedia.org OR site:bbc.com)"
+    ),
 }
 
 
@@ -184,14 +189,23 @@ def retrieve_search_results(
     elif "academic" in fm_lower:
         query = f"{query} {FOCUS_MODE_DOMAINS['academic']}"
         logger.info("🎯 Focus Mode 'Academic' active.")
+    elif "general" in fm_lower:
+        query = f"{query} {FOCUS_MODE_DOMAINS['general']}"
+        logger.info("🎯 Focus Mode 'General' active.")
 
     logger.info("🔍 Searching Google Custom Search for: %s", query)
     if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
         logger.error("GOOGLE_API_KEY or GOOGLE_CSE_ID is not set — cannot perform search.")
         return []
-    # Medical mode: fetch more results for richer clinical coverage
+    # Dynamically adjust result count based on focus mode
     is_medical = focus_mode and "medical" in focus_mode.strip().lower()
-    num_results = 5 if is_medical else MAX_SEARCH_RESULTS
+    is_academic = focus_mode and "academic" in focus_mode.strip().lower()
+    if is_medical:
+        num_results = 7
+    elif is_academic:
+        num_results = 6
+    else:
+        num_results = 5
 
     def _run_search(search_params: dict) -> list[dict]:
         """Execute a single Custom Search API call and return normalised results."""
@@ -596,10 +610,7 @@ async def ask(request: AskRequest) -> AskResponse:
         focus_mode=request.focus_mode,
     )
     if not search_results:
-        raise HTTPException(
-            status_code=503,
-            detail="Web search returned no results. Please try again.",
-        )
+        logger.warning("⚠️  Web search returned no results — LLM will answer from its own knowledge.")
 
     # ── Step 2: Scrape & clean each URL ──────────────────────────────────────
     enriched_sources: list[dict] = []
@@ -638,16 +649,12 @@ async def ask(request: AskRequest) -> AskResponse:
             source_id += 1
 
     if not enriched_sources:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Could not scrape any web content for this query. "
-                "The sites may be blocking automated access."
-            ),
-        )
+        logger.warning("⚠️  No sources could be scraped — LLM will answer conversationally.")
 
     # ── Step 3: Build context block ───────────────────────────────────────────
-    context: str = build_context(enriched_sources)
+    context: str = build_context(enriched_sources) if enriched_sources else ""
+    if not context:
+        context = "لا توجد نتائج بحث. أجب على المستخدم بناءً على معرفتك العامة أو بشكل حواري كأنك مساعد شخصي."
 
     # ── Step 4: Generate answer via LLM ──────────────────────────────────────
     answer: str = generate_answer(
