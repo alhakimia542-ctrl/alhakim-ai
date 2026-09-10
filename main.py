@@ -2,7 +2,7 @@
 Alhakim AI — Answer Engine Backend
 ====================================
 A production-ready FastAPI server implementing a RAG pipeline:
-  1. Retrieve → Google Custom Search API (top 3 organic results)
+  1. Retrieve → Serper API (top organic results via google.serper.dev)
   2. Scrape   → requests + BeautifulSoup HTML cleaning
   3. Generate → OpenRouter LLM (Claude Sonnet / Llama fallback)
 
@@ -45,17 +45,7 @@ if not OPENROUTER_API_KEY:
         "OPENROUTER_API_KEY is not set. Requests to the LLM will fail."
     )
 
-GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
-if not GOOGLE_API_KEY:
-    logger.warning(
-        "GOOGLE_API_KEY is not set. Web search will fail."
-    )
-
-GOOGLE_CSE_ID: str = os.getenv("GOOGLE_CSE_ID", "")
-if not GOOGLE_CSE_ID:
-    logger.warning(
-        "GOOGLE_CSE_ID is not set. Web search will fail."
-    )
+SERPER_API_KEY: str = os.getenv("SERPER_API_KEY", "5c5e8abe8d3b3a8ebdcfacf020366ab591802282")
 
 # Number of search results to retrieve
 MAX_SEARCH_RESULTS: int = 3
@@ -134,7 +124,7 @@ class AskResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Module 1 — Retriever (Google Custom Search API)
+# Module 1 — Retriever (Serper API)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Focus Mode — trusted domain filters appended to the search query
@@ -162,20 +152,22 @@ def retrieve_search_results(
     focus_mode: Optional[str] = "web",
 ) -> list[dict]:
     """
-    Search Google via Custom Search API and return the top MAX_SEARCH_RESULTS organic
-    results.  Each returned dict is normalised to contain:
+    Search Google via the Serper API and return the top organic results.
+    Each returned dict is normalised to contain:
       'title'   — page title
-      'url'     — canonical page URL  (from 'link' field)
-      'content' — short snippet text  (from 'snippet' field)
+      'url'     — canonical page URL  (mapped from Serper's 'link' field)
+      'content' — short snippet text  (mapped from Serper's 'snippet' field)
 
     When *focus_mode* is 'medical' or 'academic', trusted domain filters are
     appended to the query **unless** *site_filter* is already actively set,
     since an explicit site filter takes precedence.
     """
+    import json as _json
+
     # Explicit site_filter takes priority over focus_mode domain injection
     is_custom_site = (
-        site_filter 
-        and site_filter.strip() 
+        site_filter
+        and site_filter.strip()
         and site_filter.strip().lower() not in ("all", "all sites")
     )
 
@@ -193,10 +185,8 @@ def retrieve_search_results(
         query = f"{query} {FOCUS_MODE_DOMAINS['general']}"
         logger.info("🎯 Focus Mode 'General' active.")
 
-    logger.info("🔍 Searching Google Custom Search for: %s", query)
-    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
-        logger.error("GOOGLE_API_KEY or GOOGLE_CSE_ID is not set — cannot perform search.")
-        return []
+    logger.info("🔍 Searching via Serper API for: %s", query)
+
     # Dynamically adjust result count based on focus mode
     is_medical = focus_mode and "medical" in focus_mode.strip().lower()
     is_academic = focus_mode and "academic" in focus_mode.strip().lower()
@@ -207,17 +197,21 @@ def retrieve_search_results(
     else:
         num_results = 5
 
-    def _run_search(search_params: dict) -> list[dict]:
-        """Execute a single Custom Search API call and return normalised results."""
+    def _run_search(payload: dict) -> list[dict]:
+        """Execute a single Serper API call and return normalised results."""
         try:
-            response = requests.get(
-                "https://www.googleapis.com/customsearch/v1",
-                params=search_params,
-                timeout=REQUEST_TIMEOUT
+            response = requests.post(
+                "https://google.serper.dev/search",
+                headers={
+                    "X-API-KEY": SERPER_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                data=_json.dumps(payload),
+                timeout=REQUEST_TIMEOUT,
             )
             response.raise_for_status()
             raw: dict = response.json()
-            items: list[dict] = raw.get("items", [])
+            items: list[dict] = raw.get("organic", [])
             return [
                 {
                     "title":   item.get("title", "No Title"),
@@ -228,45 +222,43 @@ def retrieve_search_results(
                 if item.get("link")
             ]
         except Exception as exc:
-            logger.error("Google Custom Search API request failed: %s", exc)
+            logger.error("Serper API request failed: %s", exc)
             return []
 
     try:
-        params = {
-            "key": GOOGLE_API_KEY,
-            "cx": GOOGLE_CSE_ID,
-            "q": query,
-            "num": num_results,          # number of organic results to request
-            "hl": "ar",                  # result language
+        payload: dict = {
+            "q":   query,
+            "num": num_results,   # number of organic results to request
+            "hl":  "ar",          # result language
         }
         if time_filter and time_filter.strip():
-            params["dateRestrict"] = time_filter.strip()
+            payload["tbs"] = time_filter.strip()
         elif is_medical:
             # Auto-apply past-year recency filter for medical queries so that
             # cutting-edge guidelines and recent trial data are prioritised.
-            params["dateRestrict"] = "y[1]"
-            logger.info("🗓️  Medical mode: auto-applied past-year recency filter (dateRestrict=y[1]).")
+            payload["tbs"] = "qdr:y"
+            logger.info("🗓️  Medical mode: auto-applied past-year recency filter (tbs=qdr:y).")
 
-        results = _run_search(params)
+        results = _run_search(payload)
         logger.info("   Found %d organic result(s).", len(results))
 
         # ── Medical fallback: retry without time restriction ──────────────────
         # If the strict recency filter yielded nothing (e.g. a niche clinical
-        # topic with no recent indexed pages), drop dateRestrict and search again across
-        # the same 9 trusted medical domains so we never surface an empty result.
-        if not results and is_medical and "dateRestrict" in params and not (time_filter and time_filter.strip()):
+        # topic with no recent indexed pages), drop tbs and search again across
+        # the same trusted medical domains so we never surface an empty result.
+        if not results and is_medical and "tbs" in payload and not (time_filter and time_filter.strip()):
             logger.warning(
                 "⚠️  Medical recency search returned 0 results — retrying without time filter."
             )
-            params_fallback = {k: v for k, v in params.items() if k != "dateRestrict"}
-            results = _run_search(params_fallback)
+            payload_fallback = {k: v for k, v in payload.items() if k != "tbs"}
+            results = _run_search(payload_fallback)
             logger.info(
                 "   Fallback search found %d organic result(s).", len(results)
             )
 
         return results
     except Exception as exc:
-        logger.error("Google Custom Search failed: %s", exc)
+        logger.error("Serper API search failed: %s", exc)
         return []
 
 
