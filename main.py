@@ -455,6 +455,14 @@ MEDICAL_GUARDRAIL: str = (
     "DO NOT give general medical advice."
 )
 
+CONFERENCES_GUARDRAIL: str = (
+    "\n\nCRITICAL FOR CONFERENCES MODE: "
+    "1. You MUST organize the retrieved conference data into a clean, well-structured Markdown table "
+    "with columns: | اسم المؤتمر (Conference) | التاريخ الدقيق (Exact Dates) | المكان (Location) |.\n"
+    "2. Present the content clearly in professional Arabic while keeping English proper nouns intact.\n"
+    "3. Ensure the response is fully completed, comprehensive, and never truncated."
+)
+
 
 def generate_answer(
     messages_history: list[MessageItem],
@@ -474,9 +482,14 @@ def generate_answer(
 
     # Apply medical guardrail when focus_mode is 'medical'
     effective_system_prompt = SYSTEM_PROMPT
-    if focus_mode and "medical" in focus_mode.strip().lower():
-        effective_system_prompt = SYSTEM_PROMPT + MEDICAL_GUARDRAIL
-        logger.info("🏥 Medical guardrail active — strict context-only rule applied.")
+    if focus_mode:
+        fm_lower = focus_mode.strip().lower()
+        if "medical" in fm_lower:
+            effective_system_prompt = SYSTEM_PROMPT + MEDICAL_GUARDRAIL
+            logger.info("🏥 Medical guardrail active — strict context-only rule applied.")
+        elif "conferences" in fm_lower:
+            effective_system_prompt = SYSTEM_PROMPT + CONFERENCES_GUARDRAIL
+            logger.info("📅 Conferences guardrail active — Markdown table formatting enforced.")
 
     messages = [{"role": "system", "content": effective_system_prompt}]
     for msg in messages_history[:-1]:
@@ -523,11 +536,13 @@ def generate_answer(
     )
 
 
-def rewrite_search_query(messages: list[MessageItem]) -> str:
+def rewrite_search_query(messages: list[MessageItem], focus_mode: Optional[str] = None) -> str:
     """
     Rewrite the conversation history into a standalone search query.
     """
-    if len(messages) == 1:
+    is_conferences = focus_mode and "conferences" in focus_mode.strip().lower()
+
+    if len(messages) == 1 and not is_conferences:
         return messages[0].content
 
     logger.info("✍️ Rewriting search query using conversation history...")
@@ -537,6 +552,14 @@ def rewrite_search_query(messages: list[MessageItem]) -> str:
         "Output ONLY the raw search query without quotes, explanations, or conversational text."
     )
     
+    if is_conferences:
+        system_prompt = (
+            "Given the user's request (even if written in Arabic), translate and rewrite it into a concise, "
+            "standalone English search query optimized for international medical conference websites "
+            "(e.g., converting 'مؤتمرات طب قلب الأطفال 2026' into 'pediatric cardiology conferences 2026'). "
+            "Output ONLY the raw search query without quotes, explanations, or conversational text."
+        )
+
     # Build messages for LLM
     llm_messages = [{"role": "system", "content": system_prompt}]
     for msg in messages:
@@ -599,7 +622,7 @@ async def ask(request: AskRequest) -> AskResponse:
     logger.info("📨 New query: %s", last_message)
 
     # Rewrite query if there is history
-    search_query = rewrite_search_query(request.messages)
+    search_query = rewrite_search_query(request.messages, request.focus_mode)
 
     # ── Step 1: Retrieve search results ──────────────────────────────────────
     search_results = retrieve_search_results(
