@@ -142,6 +142,7 @@ FOCUS_MODE_DOMAINS: dict[str, str] = {
         "OR site:aljazeera.net OR site:alarabiya.net OR site:github.com "
         "OR site:wikipedia.org OR site:bbc.com)"
     ),
+    "conferences": "(site:emedevents.com OR site:mdlinx.com OR site:medicaleventsguide.com OR site:clocate.com OR site:eventbrite.com OR site:ama-assn.org OR site:asco.org OR site:escardio.org)",
 }
 
 
@@ -184,15 +185,21 @@ def retrieve_search_results(
     elif "general" in fm_lower:
         query = f"{query} {FOCUS_MODE_DOMAINS['general']}"
         logger.info("🎯 Focus Mode 'General' active.")
+    elif "conferences" in fm_lower:
+        query = f"{query} {FOCUS_MODE_DOMAINS['conferences']}"
+        logger.info("🎯 Focus Mode 'Conferences' active.")
 
     logger.info("🔍 Searching via Serper API for: %s", query)
 
     # Dynamically adjust result count based on focus mode
     is_medical = focus_mode and "medical" in focus_mode.strip().lower()
     is_academic = focus_mode and "academic" in focus_mode.strip().lower()
+    is_conferences = focus_mode and "conferences" in focus_mode.strip().lower()
     if is_medical:
         num_results = 7
     elif is_academic:
+        num_results = 6
+    elif is_conferences:
         num_results = 6
     else:
         num_results = 5
