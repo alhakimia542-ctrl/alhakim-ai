@@ -11,6 +11,7 @@ Version : 1.2.0
 """
 
 import ipaddress
+import json
 import os
 import re
 import logging
@@ -21,10 +22,12 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
@@ -38,6 +41,31 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("alhakim-ai")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Firebase Initialisation
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    _firebase_creds_str: str = os.getenv("FIREBASE_CREDENTIALS", "")
+    if _firebase_creds_str:
+        _firebase_creds_dict: dict = json.loads(_firebase_creds_str)
+        _cred = credentials.Certificate(_firebase_creds_dict)
+        firebase_admin.initialize_app(_cred)
+        _db = firestore.client()
+        logger.info("🔥 Firebase Admin SDK initialised successfully.")
+    else:
+        _db = None
+        logger.warning(
+            "⚠️  FIREBASE_CREDENTIALS env var is not set. "
+            "Firestore data logging will be disabled."
+        )
+except Exception as _firebase_init_err:
+    _db = None
+    logger.error(
+        "❌ Firebase initialisation failed — data logging disabled. Error: %s",
+        _firebase_init_err,
+    )
 
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 if not OPENROUTER_API_KEY:
@@ -584,6 +612,50 @@ def rewrite_search_query(messages: list[MessageItem], focus_mode: Optional[str] 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Data Logging (Firestore Background Task)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def log_finetuning_data(query: str, context: str, answer: str) -> None:
+    """
+    Background task — saves a training example to the Firestore
+    `training_data` collection in the standard chat-completion message format.
+
+    Failures are caught and logged without propagating to the request cycle.
+    """
+    if _db is None:
+        logger.warning("⚠️  Firestore client unavailable — skipping data log.")
+        return
+
+    try:
+        doc = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "أنت كاشف، محرك بحث ذكي تم تطويره بواسطة شركة الحكيمي. "
+                        "مهامك هي تحليل نتائج البحث وتلخيصها بدقة. "
+                        "قدم الإجابات مباشرة دون مقدمات حشوية واعتمد على السياق المرفق فقط "
+                        "مع وضع أرقام المصادر."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Context:\n{context}\n\nUser Query:\n{query}",
+                },
+                {
+                    "role": "assistant",
+                    "content": answer,
+                },
+            ],
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        }
+        _db.collection("training_data").add(doc)
+        logger.info("📝 Training data logged to Firestore successfully.")
+    except Exception as exc:
+        logger.error("❌ Failed to log training data to Firestore: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # API Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -602,7 +674,7 @@ async def get_models() -> list[dict]:
     ]
 
 @app.post("/api/ask", response_model=AskResponse, summary="Ask the answer engine")
-async def ask(request: AskRequest) -> AskResponse:
+async def ask(request: AskRequest, background_tasks: BackgroundTasks) -> AskResponse:
     """
     Full RAG pipeline endpoint:
       1. Validate input
@@ -694,6 +766,15 @@ async def ask(request: AskRequest) -> AskResponse:
 
     logger.info("✅ Response ready. Sources: %d", len(sources_out))
     logger.info("=" * 60)
+
+    # ── Step 6: Queue Firestore data logging as a background task ─────────────
+    # Runs after the response is sent — never blocks or crashes the request.
+    background_tasks.add_task(
+        log_finetuning_data,
+        query=last_message,
+        context=context,
+        answer=answer,
+    )
 
     return AskResponse(answer=answer, sources=sources_out)
 

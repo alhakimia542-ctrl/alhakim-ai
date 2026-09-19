@@ -25,3 +25,6 @@ lxml==5.3.0          # Faster HTML parser backend for BeautifulSoup
 
 # OpenAI SDK (used as OpenRouter client)
 openai==1.57.4
+
+# Firebase Admin SDK (Firestore data logging)
+firebase-admin==6.6.0
