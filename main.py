@@ -145,7 +145,7 @@ class AskRequest(BaseModel):
     messages: list[MessageItem]
     site_filter: Optional[str] = None
     time_filter: Optional[str] = None
-    model: Optional[str] = "google/gemini-1.5-flash"
+    model: Optional[str] = "alhakimia54/Kashef-Qwen-2.5-3B"
     focus_mode: Optional[str] = "web"
 
 
@@ -472,7 +472,7 @@ def build_context(sources: list[dict]) -> str:
 # Module 4 — LLM Generation (OpenRouter)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT: str = """You are Alhakim AI, a highly intelligent, authoritative, and precise answer engine.
+SYSTEM_PROMPT: str = """You are Kashef AI (كاشف), a highly intelligent, authoritative, and precise answer engine developed by Alhakimi team.
 
 Your behaviour rules:
 1. Answer the user's query directly using the provided context, but DO NOT use prefatory phrases like "Based on the provided text", "According to the context", "The search results say", or "Based on the search".
@@ -518,15 +518,18 @@ def generate_answer(
     )
 
     # Apply medical guardrail when focus_mode is 'medical'
-    effective_system_prompt = SYSTEM_PROMPT
-    if focus_mode:
-        fm_lower = focus_mode.strip().lower()
-        if "medical" in fm_lower:
-            effective_system_prompt = SYSTEM_PROMPT + MEDICAL_GUARDRAIL
-            logger.info("🏥 Medical guardrail active — strict context-only rule applied.")
-        elif "conferences" in fm_lower:
-            effective_system_prompt = SYSTEM_PROMPT + CONFERENCES_GUARDRAIL
-            logger.info("📅 Conferences guardrail active — Markdown table formatting enforced.")
+    if not context:
+        effective_system_prompt = "أنت كاشف (Kashef AI)، مساعد ذكي ومحترف تم تطويره بواسطة فريق الحكيمي. أجب على المستخدم بأسلوب ودود ومباشر باللغة العربية. لا تستخدم أرقام المصادر أو الاقتباسات لأن هذه محادثة عادية."
+    else:
+        effective_system_prompt = SYSTEM_PROMPT
+        if focus_mode:
+            fm_lower = focus_mode.strip().lower()
+            if "medical" in fm_lower:
+                effective_system_prompt = SYSTEM_PROMPT + MEDICAL_GUARDRAIL
+                logger.info("🏥 Medical guardrail active — strict context-only rule applied.")
+            elif "conferences" in fm_lower:
+                effective_system_prompt = SYSTEM_PROMPT + CONFERENCES_GUARDRAIL
+                logger.info("📅 Conferences guardrail active — Markdown table formatting enforced.")
 
     messages = [{"role": "system", "content": effective_system_prompt}]
     for msg in messages_history[:-1]:
@@ -594,9 +597,13 @@ def rewrite_search_query(messages: list[MessageItem], focus_mode: Optional[str] 
 
     logger.info("✍️ Rewriting search query using conversation history...")
     system_prompt = (
-        "Given the conversation history, rewrite the user's last message "
-        "into a standalone search query that can be used in Google Search. "
-        "Output ONLY the raw search query without quotes, explanations, or conversational text."
+        "You are an intent classification router. Analyze the conversation history. "
+        "If the user's latest message is a casual greeting (e.g., 'hello', 'مرحبا', 'كيف حالك'), "
+        "a question about your identity (e.g., 'who are you', 'ما اسمك', 'من أنت'), "
+        "or a basic conversational prompt that clearly does NOT require live web search, "
+        "output EXACTLY the string: NO_SEARCH\n"
+        "Otherwise, rewrite the user's message into a concise, standalone English search query "
+        "optimized for Google Search. Output ONLY the query or NO_SEARCH, with no quotes or extra text."
     )
     
     if is_conferences:
@@ -716,59 +723,63 @@ async def ask(request: AskRequest, background_tasks: BackgroundTasks) -> AskResp
     # Rewrite query if there is history
     search_query = rewrite_search_query(request.messages, request.focus_mode)
 
-    # ── Step 1: Retrieve search results ──────────────────────────────────────
-    search_results = retrieve_search_results(
-        query=search_query,
-        site_filter=request.site_filter,
-        time_filter=request.time_filter,
-        focus_mode=request.focus_mode,
-    )
-    if not search_results:
-        logger.warning("⚠️  Web search returned no results — LLM will answer from its own knowledge.")
-
-    # ── Step 2: Scrape & clean each URL ──────────────────────────────────────
-    enriched_sources: list[dict] = []
-    source_id: int = 1
-
-    for result in search_results:
-        url: str   = result.get("url", "")
-        title: str = result.get("title", "No Title")
-        # Google Custom Search returns a pre-extracted snippet; use it as a fallback when
-        # the full scraper is blocked or the page returns an error.
-        search_snippet: str = result.get("content", "")
-
-        if not url:
-            continue
-
-        # Medical focus mode: allow up to 3000 chars to preserve full clinical
-        # trial parameters, dosage tables, and study methodology details.
-        is_medical_mode = request.focus_mode and "medical" in request.focus_mode.strip().lower()
-        effective_max_chars = 3000 if is_medical_mode else MAX_SOURCE_CHARS
-        logger.info("🌐 Scraping [%d/%d]: %s", source_id, len(search_results), url)
-        scraped = scrape_and_clean(url)
-        if scraped:
-            content = scraped[:effective_max_chars]
-        else:
-            content = search_snippet[:effective_max_chars] or None
-
-        if content:
-            enriched_sources.append(
-                {
-                    "id": source_id,
-                    "title": title,
-                    "url": url,
-                    "content": content,
-                }
-            )
-            source_id += 1
-
-    if not enriched_sources:
-        logger.warning("⚠️  No sources could be scraped — LLM will answer conversationally.")
-
-    # ── Step 3: Build context block ───────────────────────────────────────────
-    context: str = build_context(enriched_sources) if enriched_sources else ""
-    if not context:
-        context = "لا توجد نتائج بحث. أجب على المستخدم بناءً على معرفتك العامة أو بشكل حواري كأنك مساعد شخصي."
+    if search_query.strip() == "NO_SEARCH":
+        logger.info("🤖 Conversational intent detected. Bypassing live web search.")
+        search_results = []
+        enriched_sources = []
+        context = ""
+    else:
+        # ── Step 1: Retrieve search results ──────────────────────────────────────
+        search_results = retrieve_search_results(
+            query=search_query,
+            site_filter=request.site_filter,
+            time_filter=request.time_filter,
+            focus_mode=request.focus_mode,
+        )
+        if not search_results:
+            logger.warning("⚠️  Web search returned no results — LLM will answer from its own knowledge.")
+    
+        # ── Step 2: Scrape & clean each URL ──────────────────────────────────────
+        enriched_sources: list[dict] = []
+        source_id: int = 1
+    
+        for result in search_results:
+            url: str   = result.get("url", "")
+            title: str = result.get("title", "No Title")
+            # Google Custom Search returns a pre-extracted snippet; use it as a fallback when
+            # the full scraper is blocked or the page returns an error.
+            search_snippet: str = result.get("content", "")
+    
+            if not url:
+                continue
+    
+            # Medical focus mode: allow up to 3000 chars to preserve full clinical
+            # trial parameters, dosage tables, and study methodology details.
+            is_medical_mode = request.focus_mode and "medical" in request.focus_mode.strip().lower()
+            effective_max_chars = 3000 if is_medical_mode else MAX_SOURCE_CHARS
+            logger.info("🌐 Scraping [%d/%d]: %s", source_id, len(search_results), url)
+            scraped = scrape_and_clean(url)
+            if scraped:
+                content = scraped[:effective_max_chars]
+            else:
+                content = search_snippet[:effective_max_chars] or None
+    
+            if content:
+                enriched_sources.append(
+                    {
+                        "id": source_id,
+                        "title": title,
+                        "url": url,
+                        "content": content,
+                    }
+                )
+                source_id += 1
+    
+        if not enriched_sources:
+            logger.warning("⚠️  No sources could be scraped — LLM will answer conversationally.")
+    
+        # ── Step 3: Build context block ───────────────────────────────────────────
+        context: str = build_context(enriched_sources) if enriched_sources else ""
 
     # ── Step 4: Generate answer via LLM ──────────────────────────────────────
     answer: str = generate_answer(
