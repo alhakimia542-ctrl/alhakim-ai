@@ -73,6 +73,10 @@ if not OPENROUTER_API_KEY:
         "OPENROUTER_API_KEY is not set. Requests to the LLM will fail."
     )
 
+HF_TOKEN: str = os.getenv("HF_TOKEN", "")
+if not HF_TOKEN:
+    logger.warning("HF_TOKEN is not set. Hugging Face model requests will fail.")
+
 SERPER_API_KEY: str = os.getenv("SERPER_API_KEY", "5c5e8abe8d3b3a8ebdcfacf020366ab591802282")
 
 # Number of search results to retrieve
@@ -93,6 +97,11 @@ FALLBACK_MODEL: str = "meta-llama/llama-3.3-70b-instruct"
 openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
+)
+
+hf_client = OpenAI(
+    base_url="https://api-inference.huggingface.co/v1/",
+    api_key=HF_TOKEN,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -525,19 +534,29 @@ def generate_answer(
     messages.append({"role": "user", "content": user_message})
 
     model_to_use = selected_model if selected_model else "google/gemini-1.5-flash"
-    fallback = "meta-llama/llama-3.2-3b-instruct"
+    fallback = FALLBACK_MODEL
 
     for model in (model_to_use, fallback):
         try:
             logger.info("🤖 Calling model: %s", model)
-            completion = openrouter_client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.3,      # Lower temp → more factual, less hallucination
-                max_tokens=2500,
-                presence_penalty=0.6,
-                frequency_penalty=0.6,
-            )
+            if model == "alhakimia54/Kashef-Qwen-2.5-3B":
+                completion = hf_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.3,
+                    max_tokens=2500,
+                    presence_penalty=0.6,
+                    frequency_penalty=0.6,
+                )
+            else:
+                completion = openrouter_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.3,      # Lower temp → more factual, less hallucination
+                    max_tokens=2500,
+                    presence_penalty=0.6,
+                    frequency_penalty=0.6,
+                )
             answer: str = completion.choices[0].message.content or ""
             logger.info("   ✅ Answer received (%d chars).", len(answer))
             return answer
@@ -671,6 +690,7 @@ async def get_models() -> list[dict]:
         {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"},
         {"id": "deepseek/deepseek-chat", "name": "DeepSeek V3"},
         {"id": "meta-llama/llama-3.3-70b-instruct", "name": "Llama 3.3 70B"},
+        {"id": "alhakimia54/Kashef-Qwen-2.5-3B", "name": "Kashef Qwen 2.5 (Custom)"}
     ]
 
 @app.post("/api/ask", response_model=AskResponse, summary="Ask the answer engine")
